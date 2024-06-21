@@ -1,0 +1,74 @@
+---
+- name: Build and run Staging
+  hosts: test
+  become: true
+  become_method: sudo
+  vars:
+    app_path: /home/andy/ansible/devops-test
+    app_name: test-app
+    version_tag: "{{ansible_date_time.iso8601_basic}}"
+  tasks:
+
+    - name: Copy Dockerfile to the server
+      copy:
+        content: |
+          FROM node:14.15.0-stretch
+          WORKDIR /app
+          COPY package.json yarn.lock ./
+          RUN yarn install
+          COPY public ./public
+          COPY src/ ./src
+          RUN yarn build
+          FROM nginx:alpine
+          COPY --from=0 /app/build /usr/share/nginx/html
+          EXPOSE 80
+          CMD ["nginx", "-g", "daemon off;"]
+        dest: "{{app_path}}/Dockerfile"
+
+    - name: Build Docker image for staging
+      docker_image:
+        build:
+          path: "{{app_path}}"
+        name: "{{app_name}}_staging"
+        tag: "{{version_tag}}"
+        source: build
+        state: present
+
+    - name: Check if staging container is already running
+      docker_container_info:
+        name: "{{app_name}}_staging"
+      register: prevstaging
+
+    - set_fact: imagename="{{ prevstaging.container.Config.Image | split(':') }}"
+      when: prevstaging.exists
+
+    - name: Stop and remove existing staging container if running
+      docker_container:
+        name: "{{app_name}}_staging"
+        state: absent
+      when: prevstaging.exists
+
+    - name: Remove existing staging image tag
+      docker_image:
+        name: "{{app_name}}_staging"
+        tag: "{{ imagename.1 }}"
+        state: absent
+        force_tag: yes
+      when: prevstaging.exists
+
+    - name: Run Docker container for staging
+      docker_container:
+        name: "{{app_name}}_staging"
+        image: "{{app_name}}_staging:{{version_tag}}"
+        state: started
+        ports:
+          - "8090:80"
+
+    - name: Wait for staging container to be healthy
+      uri:
+        url: http://localhost:8090
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 5
+      delay: 10

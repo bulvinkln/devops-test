@@ -1,0 +1,84 @@
+---
+- name: Release staging to Prod
+  hosts: test
+  become: true
+  become_method: sudo
+  vars:
+    app_name: test-app
+  tasks:
+
+    - name: Check staging container is running
+      docker_container_info:
+        name: "{{app_name}}_staging"
+      register: staging
+
+    - set_fact: stagingimage="{{ staging.container.Config.Image | split(':') }}"
+      #when: staging.exists
+
+    - name: Check rollback container is running
+      docker_container_info:
+        name: "{{app_name}}_rollback"
+      register: rollback
+
+    - set_fact: rollbackimage="{{ rollback.container.Config.Image | split(':') }}"
+      when: rollback.exists
+
+    - name: Check prod container is running
+      docker_container_info:
+        name: "{{app_name}}_prod"
+      register: prod
+
+    - set_fact: prodimage="{{ prod.container.Config.Image | split(':') }}"
+      when: prod.exists
+
+    - name: Stop and remove previous rollback container
+      docker_container:
+        name: "{{app_name}}_rollback"
+        state: absent
+      when: rollback.exists
+
+    - name: Remove previous rollback image tag
+      docker_image:
+        name: "{{app_name}}_rollback"
+        tag: "{{ rollbackimage.1 }}"
+        state: absent
+        force_tag: yes
+      when: rollback.exists
+
+    - name: Stop prod container
+      docker_container:
+        name: "{{app_name}}_prod"
+        state: stopped
+      when: prod.exists
+
+    - name: Tag and rename current prod image as new rollback image
+      shell: "docker tag {{app_name}}_prod:{{prodimage.1}} {{app_name}}_rollback:{{prodimage.1}} && docker rename {{app_name}}_prod {{app_name}}_rollback"
+      when: prod.exists
+
+    - name: Remove prod image tag from new rollback image
+      docker_image:
+        name: "{{app_name}}_prod"
+        tag: "{{ prodimage.1 }}"
+        state: absent
+        force_tag: yes
+      when: prod.exists
+
+    - name: Tag current staging image as new prod container
+      shell: "docker tag {{app_name}}_staging:{{stagingimage.1}} {{app_name}}_prod:{{stagingimage.1}}"
+
+    - name: Create new prod container
+      docker_container:
+        name: "{{app_name}}_prod"
+        image: "{{app_name}}_prod:{{stagingimage.1}}"
+        state: started
+        ports:
+          - "8080:80"
+
+    - name: Wait for prod container to be healthy
+      uri:
+        url: http://localhost:8080
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 5
+      delay: 10

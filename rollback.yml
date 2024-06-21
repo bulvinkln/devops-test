@@ -1,0 +1,59 @@
+---
+- name: Rollback prod to previous version
+  hosts: test
+  become: true
+  become_method: sudo
+  vars:
+    app_name: test-app
+  tasks:
+
+    - name: Check rollback container is running
+      docker_container_info:
+        name: "{{app_name}}_rollback"
+      register: rollback
+
+    - set_fact: rollbackimage="{{ rollback.container.Config.Image | split(':') }}"
+      #when: rollback.exists
+
+    - name: Check prod container is running
+      docker_container_info:
+        name: "{{app_name}}_prod"
+      register: prod
+
+    - set_fact: prodimage="{{ prod.container.Config.Image | split(':') }}"
+      #when: prod.exists
+
+    - name: Stop and remove prod container
+      docker_container:
+        name: "{{app_name}}_prod"
+        state: absent
+      #when: rollback.exists
+
+    - name: Remove prod image tag
+      docker_image:
+        name: "{{app_name}}_prod"
+        tag: "{{ prodimage.1 }}"
+        state: absent
+        force_tag: yes
+      #when: prod.exists
+
+    - name: Tag and rename rollback image as prod
+      shell: "docker tag {{app_name}}_rollback:{{rollbackimage.1}} {{app_name}}_prod:{{rollbackimage.1}} && docker rename {{app_name}}_rollback {{app_name}}_prod && docker rmi {{app_name}}_rollback:{{rollbackimage.1}}"
+      #when: prod.exists
+
+    - name: Start rollback container as prod
+      docker_container:
+        name: "{{app_name}}_prod"
+        image: "{{app_name}}_prod:{{rollbackimage.1}}"
+        state: started
+        ports:
+          - "8080:80"
+
+    - name: Wait for prod container to be healthy
+      uri:
+        url: http://localhost:8080
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 5
+      delay: 10
